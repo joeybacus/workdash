@@ -91,7 +91,9 @@ async function loadAll() {
   const [boot, sched] = await Promise.allSettled([api("wd_bootstrap"), api("schedule")]);
   if (boot.status === "fulfilled") {
     state.visits = boot.value.visits.map(v => ({ ...v }));
-    state.patients = new Map(boot.value.patients.map(p => [p.hospital_no, { ...p, age: p.age === "" ? null : +p.age }]));
+    // Patient Records rows; rows typed in by hand may have no hospital no. yet (kept under their name)
+    state.patients = new Map(boot.value.patients.filter(p => WD.clean(p.hospital_no) || WD.clean(p.last))
+      .map(p => [patientKey(p), { ...p, hospital_no: WD.clean(p.hospital_no), age: ageNum(p.age) }]));
   } else toast(`Couldn't load patients: ${boot.reason.message}`, "bad", 10000);
   if (sched.status === "fulfilled") state.schedule = WD.parseSchedule(sched.value.values, { settings: S });
   else toast(`Couldn't load the schedule: ${sched.reason.message}`, "bad", 10000);
@@ -111,6 +113,24 @@ async function reloadSchedule(quiet) {
 }
 
 // ------------------------------------------------------------------ patients and visits
+const patientKey = p => WD.clean(p.hospital_no) || `name:${WD.nameKey(`${p.last}, ${p.first}`)}`;
+const ageNum = a => { const n = parseInt(a, 10); return Number.isFinite(n) ? n : null; };
+
+/* A Patient Records row for a logsheet row that has no hospital no.: same name, and the sex and age
+   (when known on both sides) agree. Only used when exactly one record fits - never a guess. */
+function matchByName(v) {
+  const m = /(\d+)\s*\/\s*([MF])/i.exec(v.age_sex || ""), age = m ? +m[1] : null, sex = m ? m[2].toUpperCase() : "";
+  const fits = [...state.patients.values()].filter(p => {
+    if (!WD.samePerson(`${p.last}, ${p.first}`, v.name)) return false;
+    const ps = WD.clean(p.sex).toUpperCase()[0] || "";
+    if (sex && ps && ps !== sex) return false;
+    const b = WD.parseDate(p.birthdate), pa = b ? WD.ageOn(b, WD.fromIso(v.visit_date) || state.date) : p.age;
+    if (age !== null && pa !== null && pa !== undefined && Math.abs(pa - age) > 1) return false;
+    return true;
+  });
+  return fits.length === 1 ? fits[0] : null;
+}
+
 function priorVisits(hno, name, before) {
   const k = WD.nameKey(name);
   return state.visits.filter(v => v.visit_date < before && ((hno && v.hospital_no === hno) || (k && WD.nameKey(v.name) === k)))
@@ -119,8 +139,17 @@ function priorVisits(hno, name, before) {
 
 function addVisitFor(p, fromSearch) {
   const date = WD.iso(state.date), name = WD.logsheetName(p);
-  const dup = todays().find(v => (p.hospital_no && v.hospital_no === p.hospital_no) || (!v.hospital_no && WD.nameKey(v.name) === WD.nameKey(name)));
-  if (dup) { state.sel = dup.id; toast(`${dup.name} is already on this logsheet.`); renderAll(); return null; }
+  const dup = todays().find(v => (p.hospital_no && v.hospital_no === p.hospital_no) || (!v.hospital_no && WD.samePerson(v.name, name)));
+  if (dup) {
+    state.sel = dup.id;
+    if (!dup.hospital_no && p.hospital_no) {             // e.g. typed into the sheet: attach the WebHOMIS details to it
+      dup.hospital_no = p.hospital_no;
+      if (!WD.clean(dup.age_sex)) dup.age_sex = WD.ageSex(p, state.date);
+      saveVisit(dup, true);
+      toast(`${dup.name}: WebHOMIS details saved in Patient Records and linked to this row.`, "ok", 7000);
+    } else toast(`${dup.name} is already on this logsheet.`);
+    renderAll(); return null;
+  }
   const prior = priorVisits(p.hospital_no, name, date);
   const hasAge = (p.age !== null && p.age !== undefined && p.age !== "") || p.birthdate;
   const v = {
@@ -142,22 +171,50 @@ function addVisitFor(p, fromSearch) {
 async function addFromBlock(text) {
   let p;
   try { p = WD.parsePatientBlock(text); } catch (e) { toast(e.message, "warn"); return; }
-  const old = state.patients.get(p.hospital_no) || {};
-  for (const k of PATIENT_FIELDS) if ((p[k] === "" || p[k] === null || p[k] === undefined) && old[k]) p[k] = old[k];
-  state.patients.set(p.hospital_no, p);
+  rememberPatient(p);
   const v = addVisitFor(p);
   try { await api("wd_save", { patient: pick(p, PATIENT_FIELDS), visit: v ? pick(v, VISIT_FIELDS) : undefined }); setStatus(`Saved ${new Date().toLocaleTimeString()}`); }
   catch (e) { toast(`Not saved: ${e.message}`, "bad", 9000); }
   if (v) queueSync(300);
 }
 
+/* Keeps a pasted WebHOMIS block in Patient Records: blanks are filled from what was saved before, and a
+   row typed in by hand (no hospital no. yet) is taken over instead of duplicated. */
+function rememberPatient(p) {
+  const byName = state.patients.get(patientKey({ last: p.last, first: p.first }));
+  const old = state.patients.get(p.hospital_no) || byName || {};
+  for (const k of PATIENT_FIELDS) if ((p[k] === "" || p[k] === null || p[k] === undefined) && old[k]) p[k] = old[k];
+  if (byName && !byName.hospital_no) state.patients.delete(patientKey(byName));
+  state.patients.set(p.hospital_no, p);
+  return p;
+}
+
 function patientForVisit(v) {
-  if (v.hospital_no && state.patients.has(v.hospital_no)) return { patient: { ...state.patients.get(v.hospital_no) }, warn: "" };
+  if (v.hospital_no && state.patients.has(v.hospital_no)) return { patient: { ...state.patients.get(v.hospital_no) }, warn: "", note: "" };
+  const hit = !v.hospital_no && matchByName(v);
+  if (hit) return { patient: { ...hit, dx: hit.dx || v.dx }, warn: "",
+    note: `Details from Patient Records, matched by name${hit.hospital_no ? ` (Hospital No. ${hit.hospital_no})` : ""} - check it is the right patient.` };
   const [last, first] = v.name.split(",").map(s => (s || "").trim());
   const m = /(\d+)\s*\/\s*([MF])/.exec(v.age_sex || "");
   return { patient: { last, first, middle: "", hospital_no: v.hospital_no || "", age: m ? +m[1] : null,
-    sex: m ? (m[2] === "M" ? "MALE" : "FEMALE") : "", birthdate: "", address: "", dx: v.dx },
-    warn: "No WebHOMIS details saved for this patient, so hospital no., birthdate and address are blank. Copy their block from WebHOMIS once to fill them." };
+    sex: m ? (m[2] === "M" ? "MALE" : "FEMALE") : "", birthdate: "", address: "", dx: v.dx }, note: "",
+    warn: "This patient isn't in Patient Records yet, so hospital no., birthdate and address print blank. Paste their WebHOMIS block below - it's saved in the Patient Records tab of OPD OFFICIAL for every later visit." };
+}
+
+/* From the print dialog: a pasted block for this row's patient goes into Patient Records and is linked. */
+async function savePatientFromPrint(v, text) {
+  let p;
+  try { p = WD.parsePatientBlock(text); } catch (e) { toast(e.message, "warn"); return false; }
+  if (!WD.samePerson(WD.logsheetName(p), v.name)) {
+    toast(`That block is for ${WD.logsheetName(p)}, not ${v.name} - nothing saved.`, "warn", 9000); return false;
+  }
+  rememberPatient(p);
+  v.hospital_no = p.hospital_no;
+  try {
+    await api("wd_save", { patient: pick(p, PATIENT_FIELDS), visit: pick(v, VISIT_FIELDS) });
+    toast(`Saved in Patient Records: ${WD.logsheetName(p)} · Hospital No. ${p.hospital_no}.`, "ok", 7000);
+  } catch (e) { toast(`Not saved: ${e.message}`, "bad", 9000); }
+  return true;
 }
 
 // ------------------------------------------------------------------ rendering: logsheet
@@ -337,8 +394,8 @@ function search(q) {
     }
     hist = [...byKey.values()].slice(0, 12);
   }
-  out.innerHTML = known.map(p => `<div class="hit"><span class="who">${esc(WD.logsheetName(p))} · ${esc(p.hospital_no)} · ${esc(p.dx || "")}</span>
-      <button class="link" data-add-hno="${esc(p.hospital_no)}">Add</button><button class="link" data-raw-hno="${esc(p.hospital_no)}">RawData block</button></div>`).join("")
+  out.innerHTML = known.map(p => `<div class="hit"><span class="who">${esc(WD.logsheetName(p))} · ${esc(p.hospital_no || "no hospital no.")} · ${esc(p.dx || "")}</span>
+      <button class="link" data-add-key="${esc(patientKey(p))}">Add</button><button class="link" data-raw-key="${esc(patientKey(p))}">RawData block</button></div>`).join("")
     + hist.map(h => `<div class="hit"><span class="who">${esc(h.name)} · ${h.n} visit(s), last ${esc(h.last)}</span>
       <button class="link" data-add-name="${esc(h.name)}">Add</button></div>`).join("")
     || '<div class="hint">No match. Copy their block from WebHOMIS.</div>';
@@ -349,13 +406,15 @@ function openPrint() {
   const v = selected();
   if (!v) { toast("Click a patient on the logsheet first.", "warn"); return; }
   const st = state.print[v.id] = state.print[v.id] || { lab: false, rx: true, s2: false, tests: new Set(), other: "", rx_meds: "", s2_meds: "", rx_alone: false };
-  const { warn } = patientForVisit(v);
+  const { warn, note } = patientForVisit(v);
   const fu = v.followup ? `Prints the follow-up: ${esc(v.followup)}${v.decked ? ` (decked ${esc(WD.fmt(WD.fromIso(v.decked), "short"))})` : ""}` : "No follow-up set on the logsheet.";
   const testBoxes = Forms.LAB_SECTIONS.map(([skey, title]) => `<h5>${esc(title)}</h5>` + Forms.LAB_ITEMS.filter(i => i.skey === skey && !i.plain)
     .map(i => `<label><input type="checkbox" data-test="${i.key}" ${st.tests.has(i.key) ? "checked" : ""}>${esc(i.label)}</label>`).join("")).join("");
   openDialog(`
     <h3>Print forms · ${esc(v.name)}</h3>
-    ${warn ? `<div class="warn">⚠ ${esc(warn)}</div>` : ""}
+    ${warn ? `<div class="box needs-details"><div class="warn">⚠ ${esc(warn)}</div>
+      <textarea id="p-block" rows="3" placeholder="Paste the WebHOMIS Patient Information block here (Hospital No. : … Diagnosis :)"></textarea></div>` : ""}
+    ${note ? `<div class="hint">ⓘ ${esc(note)}</div>` : ""}
     <div class="checks">
       <label><input type="checkbox" id="p-lab" ${st.lab ? "checked" : ""}> Lab request</label>
       <label><input type="checkbox" id="p-rx" ${st.rx ? "checked" : ""}> Rx + Med Cert</label>
@@ -390,8 +449,12 @@ function openPrint() {
       const keys = [...st.tests].sort((a, b) => Forms.LAB_ITEMS.findIndex(i => i.key === a) - Forms.LAB_ITEMS.findIndex(i => i.key === b));
       $("#lab-sum", d).textContent = keys.length ? `${keys.length} ticked: ${keys.map(k => Forms.LAB_LABELS[k]).join(", ")}` : "Nothing ticked yet - pick a panel or open All tests.";
     };
-    d.oninput = ev => {
+    d.oninput = async ev => {
       const t = ev.target;
+      if (t.id === "p-block") {                           // details pasted for this patient -> Patient Records
+        if (WD.looksLikePatientBlock(t.value) && await savePatientFromPrint(v, t.value)) { renderAll(); openPrint(); }
+        return;
+      }
       if (t.dataset.test) { t.checked ? st.tests.add(t.dataset.test) : st.tests.delete(t.dataset.test); }
       if (t.id === "p-other") st.other = t.value;
       if (t.id === "p-rxmeds") st.rx_meds = t.value;
@@ -637,8 +700,8 @@ function wire() {
   $("#btn-remove").onclick = removeSelected;
   $("#btn-rawdata").onclick = () => {
     const v = selected();
-    const p = v && v.hospital_no && state.patients.get(v.hospital_no);
-    if (!p) { toast(v ? "No WebHOMIS details saved for this patient yet - paste their block once." : "Click a row first.", "warn"); return; }
+    const p = v && ((v.hospital_no && state.patients.get(v.hospital_no)) || matchByName(v));
+    if (!p) { toast(v ? "This patient isn't in Patient Records yet - paste their WebHOMIS block once (Ctrl+V)." : "Click a row first.", "warn"); return; }
     copyText(WD.rawdataBlock(p), "Copied. In the Google Sheet click RawData!A5 and paste - the Rx, Lab and Med Cert tabs fill in.");
   };
   $("#btn-plan").onclick = plan;
@@ -648,9 +711,9 @@ function wire() {
   $("#search").oninput = ev => { clearTimeout(searchTimer); searchTimer = setTimeout(() => search(ev.target.value), 200); };
   $("#search-results").onclick = ev => {
     const t = ev.target;
-    if (t.dataset.addHno) { const p = state.patients.get(t.dataset.addHno); const v = p && addVisitFor(p); if (v) saveVisit(v, true); $("#search").value = ""; search(""); }
+    if (t.dataset.addKey) { const p = state.patients.get(t.dataset.addKey); const v = p && addVisitFor(p); if (v) saveVisit(v, true); $("#search").value = ""; search(""); }
     if (t.dataset.addName) { const [last, first] = t.dataset.addName.split(",").map(s => s.trim()); const v = addVisitFor({ last, first, hospital_no: "" }); if (v) saveVisit(v, true); $("#search").value = ""; search(""); }
-    if (t.dataset.rawHno) { const p = state.patients.get(t.dataset.rawHno); if (p) copyText(WD.rawdataBlock(p), "Copied. In the Google Sheet click RawData!A5 and paste."); }
+    if (t.dataset.rawKey) { const p = state.patients.get(t.dataset.rawKey); if (p) copyText(WD.rawdataBlock(p), "Copied. In the Google Sheet click RawData!A5 and paste."); }
   };
 
   const tbody = $("#log tbody");
