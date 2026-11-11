@@ -447,7 +447,8 @@ async function syncSheet() {
 // ------------------------------------------------------------------ settings / setup
 function showSetup() {
   openDialog(`<h3>Connect WorkDash</h3>
-    <div>WorkDash keeps your patients in your Google Sheet, through the <b>OPD Schedule Web App</b>. Enter its address and key once on this computer.</div>
+    <div>WorkDash keeps your patients in your Google Sheet, through the <b>OPD Schedule Web App</b>.</div>
+    <div class="hint"><b>Easiest:</b> open your private setup link in this browser - it fills in everything below. Otherwise enter the address and key once on this computer.</div>
     <label class="f">Web app URL (ends in /exec)<input type="url" id="c-url" value="${esc(S.url)}" placeholder="https://script.google.com/macros/s/…/exec"></label>
     <label class="f">Key<input type="password" id="c-token" value="${esc(S.token)}" autocomplete="off"></label>
     <div class="hint">Both are saved only in this browser. On a shared computer, use "Forget this computer" in Settings when you're done.</div>
@@ -455,8 +456,10 @@ function showSetup() {
     d.onclick = async ev => {
       if (ev.target.id === "c-demo") { S.demo = true; saveSettings(); closeDialog(); loadAll(); }
       if (ev.target.id === "c-go") {
-        S.url = $("#c-url", d).value.trim(); S.token = $("#c-token", d).value.trim(); S.demo = false;
-        if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(S.url)) { toast("That URL doesn't look like an Apps Script Web app URL.", "warn"); return; }
+        const url = $("#c-url", d).value.trim(), token = $("#c-token", d).value.trim();
+        if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) { toast("That URL doesn't look like an Apps Script Web app URL.", "warn"); return; }
+        if (!token) { toast("The key is missing - open your setup link in this browser instead; it fills in both.", "warn", 8000); return; }
+        S.url = url; S.token = token; S.demo = false;
         saveSettings(); closeDialog(); loadAll();
       }
     };
