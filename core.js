@@ -413,9 +413,100 @@ const WD = (() => {
     return { writes, overflow };
   }
 
+  // ---------------------------------------------------------------- two-way sync with an OPD Patients block
+  /* visits: this date's WorkDash visits. rows: the block's 12 patient rows (A..L, shown values).
+     clears: [{seq, name}] rows WorkDash removed and wants emptied in the sheet.
+     Each visit's log_sig remembers the row (B..L) as both sides last agreed:
+       JSON array -> synced: a three-way merge per field (a field changed on one side wins; when both
+                     sides changed the same field, WorkDash wins because that's the screen being used);
+       "new"      -> added in WorkDash, never in the sheet yet: goes into the first empty row;
+       ""         -> older data (imported history): the sheet wins, nothing is written to the sheet.
+     Returns what to write to the sheet, what to change in WorkDash, and what to report. */
+  const rowFields = r => LOG_FIELDS.map((_, i) => clean(r && r[i + 1]));
+  const visitFields = v => LOG_FIELDS.map(f => clean(v[f]));
+  const sameArr = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+  const parseSig = s => { try { const a = JSON.parse(s); return Array.isArray(a) && a.length === LOG_FIELDS.length ? a.map(clean) : null; } catch { return null; } };
+
+  function planDaySync(visits, rows, clears = []) {
+    const n = rows.length;
+    const S = rows.map(rowFields);
+    const filled = S.map(r => r.some(Boolean));
+    const used = new Set(), clearRows = new Set();
+    const out = { push: [], local: [], add: [], drop: [], conflicts: [], overflow: [], localOnly: [] };
+
+    for (const c of clears) {                    // only if that row still holds the same person
+      const i = +c.seq - 1;
+      if (i >= 0 && i < n && filled[i] && samePerson(S[i][0], c.name)) {
+        clearRows.add(i); used.add(i);
+        out.push.push({ seq: i + 1, expect: S[i][0], values: [i + 1, ...LOG_FIELDS.map(() => "")], clear: true, name: c.name });
+      }
+    }
+    const findRow = (names, prefer) => {
+      const ok = i => i >= 0 && i < n && !used.has(i) && filled[i] && names.some(nm => nm && samePerson(S[i][0], nm));
+      if (ok(prefer)) return prefer;
+      for (let i = 0; i < n; i++) if (ok(i)) return i;
+      return -1;
+    };
+    const synced = [], fresh = [], legacy = [];
+    for (const v of visits) {
+      const G = parseSig(v.log_sig);
+      if (G) synced.push([v, G]); else if (v.log_sig === "new") fresh.push(v); else legacy.push(v);
+    }
+    const settle = (v, i, M, L, why) => {        // M = the merged row both sides should end up with
+      used.add(i);
+      const seq = String(i + 1), sig = JSON.stringify(M);
+      const push = !sameArr(M, S[i]);
+      if (push) out.push.push({ seq: i + 1, expect: S[i][0], values: [i + 1, ...M], id: v.id, sig });
+      const fields = {};
+      LOG_FIELDS.forEach((f, k) => { if (M[k] !== L[k]) fields[f] = M[k]; });
+      if (Object.keys(fields).length || String(v.seq) !== seq || (!push && v.log_sig !== sig) || why)
+        out.local.push({ id: v.id, seq, fields, sig: push ? null : sig, why });
+    };
+
+    for (const [v, G] of synced) {
+      const L = visitFields(v);
+      const i = findRow([v.name, G[0]], +v.seq - 1);
+      if (i < 0) {
+        if (sameArr(L, G)) out.drop.push(v);     // emptied in the sheet, untouched here -> remove here too
+        else fresh.push(v);                       // emptied in the sheet but edited here -> put it back
+        continue;
+      }
+      let clash = false;
+      const M = L.map((l, k) => {
+        const s = S[i][k], g = G[k];
+        if (s === g) return l;                    // the sheet didn't change it: WorkDash's value
+        if (l === g) return s;                    // WorkDash didn't change it: the sheet's value
+        if (l !== s) clash = true;
+        return l;
+      });
+      if (clash) out.conflicts.push(v);
+      settle(v, i, M, L);
+    }
+    for (const v of legacy) {
+      const L = visitFields(v);
+      const i = findRow([v.name], +v.seq - 1);
+      if (i < 0) { out.localOnly.push(v); continue; }
+      settle(v, i, S[i].slice(), L);
+    }
+    for (const v of fresh) {
+      const L = visitFields(v);
+      let i = findRow([v.name], -1);              // typed into the sheet too: keep the sheet's values, fill its blanks
+      if (i >= 0) { settle(v, i, S[i].map((s, k) => s || L[k]), L); continue; }
+      i = [...Array(n).keys()].find(k => !used.has(k) && !filled[k] && !clearRows.has(k));
+      if (i === undefined) { out.overflow.push(v); continue; }
+      used.add(i);
+      out.push.push({ seq: i + 1, expect: "", values: [i + 1, ...L], id: v.id, sig: JSON.stringify(L) });
+      out.local.push({ id: v.id, seq: String(i + 1), fields: {}, sig: null });
+    }
+    for (let i = 0; i < n; i++) {
+      if (filled[i] && !used.has(i) && !clearRows.has(i)) out.add.push({ seq: String(i + 1), fields: Object.fromEntries(LOG_FIELDS.map((f, k) => [f, S[i][k]])), sig: JSON.stringify(S[i]) });
+    }
+    return out;
+  }
+
   return { DEFAULTS, LOG_FIELDS, TUESDAY, clean, stripMarks, nameKey, samePerson, iso, fromIso, today, addDays,
     addMonths, nearestTuesday, ageOn, fmt, parseDate, parseDateTime, parseFollowup, formatFollowup, followupWords,
     looksLikePatientBlock, parsePatientBlock, logsheetName, sexLetter, ageSex, rawdataBlock, logsheetTsv,
     holidayName, colLetter, parseSchedule, dayOn, findInSchedule, addToSchedule, planFollowup, scheduleProblems,
-    planLogsheetSync };
+    planLogsheetSync, planDaySync };
 })();

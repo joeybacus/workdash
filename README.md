@@ -2,7 +2,9 @@
 
 The online version of the Neuro OPD clinic program: one paste from WebHOMIS builds the
 logsheet row, plans and decks the follow-up Tuesday, prints the Lab request, Rx + Med Cert
-and S2 Rx, and syncs the logsheet into the OPD Google Sheet.
+and S2 Rx, and keeps the logsheet in two-way sync with the OPD Google Sheet: each clinic's block in
+OPD Patients is found by its DATE row (wherever it has moved), what's typed there shows up in
+WorkDash, and edits in WorkDash are written back - only the cells that changed.
 
 **This repository holds only the program.** There is no patient data and no key in it.
 Patient data stays in the owner's Google Sheet; each computer connects once with the

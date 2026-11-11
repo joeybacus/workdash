@@ -41,13 +41,14 @@
           <h2 id="log-title">OPD logsheet</h2>
           <span class="grow"></span>
           <button id="btn-copy" title="Tab-separated rows for pasting into the logsheet at column B">Copy rows</button>
-          <button id="btn-sync" title="Writes this logsheet into OPD Patients (from row 39) when C37 has this date">Sync to Sheet</button>
+          <button id="btn-sync" title="Two-way: brings in what was typed in OPD Patients and writes WorkDash's changes back. It also happens by itself.">Sync with Sheet</button>
           <button id="btn-print" class="primary">Print forms</button>
         </div>
         <div class="row small-buttons">
           <button id="btn-rawdata" class="link" title="For RawData!A5 in the Google Sheet">RawData block</button>
           <button id="btn-remove" class="link danger">Remove selected</button>
         </div>
+        <div id="sync-line" class="sync-line"></div>
         <div class="table-wrap">
           <table id="log">
             <thead><tr>
@@ -58,7 +59,7 @@
           </table>
           <div id="log-empty" class="empty">No patients on this logsheet yet.</div>
         </div>
-        <div class="hint">Click a row to plan its follow-up. Type in any cell to edit it; changes save by themselves.</div>
+        <div class="hint">Click a row to plan its follow-up. Type in any cell to edit it; changes save by themselves and go to OPD Patients. What's typed in OPD Patients shows up here too.</div>
       </div>
     </section>
 

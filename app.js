@@ -67,7 +67,7 @@ async function api(action, payload = {}) {
 }
 
 const VISIT_FIELDS = ["id", "visit_date", "seq", "hospital_no", "name", "age_sex", "cc", "dx", "other", "nor",
-  "ref_dept", "resident", "consultant", "dispo", "followup", "decked"];
+  "ref_dept", "resident", "consultant", "dispo", "followup", "decked", "log_sig"];
 const PATIENT_FIELDS = ["hospital_no", "last", "first", "middle", "sex", "birthdate", "age", "religion", "address",
   "logged", "room", "adm_dx", "dx"];
 const pick = (o, fields) => Object.fromEntries(fields.map(f => [f, o[f] === null || o[f] === undefined ? "" : String(o[f])]));
@@ -78,6 +78,7 @@ function saveVisit(v, now = false) {
   const go = async () => {
     try { await api("wd_save", { visit: pick(v, VISIT_FIELDS) }); setStatus(`Saved ${new Date().toLocaleTimeString()}`); }
     catch (e) { toast(`Not saved: ${e.message}`, "bad", 9000); }
+    if (v.visit_date === WD.iso(state.date)) queueSync();
   };
   if (now) return go();
   saveTimers[v.id] = setTimeout(go, 600);
@@ -97,6 +98,7 @@ async function loadAll() {
   state.loading = false;
   setStatus(boot.status === "fulfilled" ? `Loaded ${new Date().toLocaleTimeString()}` : "Not loaded");
   renderAll(true);
+  if (boot.status === "fulfilled") syncDay();
 }
 
 async function reloadSchedule(quiet) {
@@ -128,6 +130,7 @@ function addVisitFor(p, fromSearch) {
     cc: "", dx: p.dx || (prior[0] ? prior[0].dx : ""), other: prior[0] ? prior[0].other : "",
     nor: (prior.length || /FOLLOW/i.test(`${p.adm_dx || ""} ${p.room || ""}`)) ? "O" : "N", ref_dept: "",
     resident: S.resident, consultant: S.consultant, dispo: S.disposition, followup: S.followup, decked: "",
+    log_sig: "new",                      // goes into the first empty row of the OPD Patients block
   };
   state.visits.push(v);
   state.sel = v.id; state.plan = null;
@@ -145,6 +148,7 @@ async function addFromBlock(text) {
   const v = addVisitFor(p);
   try { await api("wd_save", { patient: pick(p, PATIENT_FIELDS), visit: v ? pick(v, VISIT_FIELDS) : undefined }); setStatus(`Saved ${new Date().toLocaleTimeString()}`); }
   catch (e) { toast(`Not saved: ${e.message}`, "bad", 9000); }
+  if (v) queueSync(300);
 }
 
 function patientForVisit(v) {
@@ -167,13 +171,16 @@ function renderLog() {
   $("#count").textContent = `${vs.length} today · ${newCount} new`;
   $("#log-empty").hidden = vs.length > 0;
   $("#log tbody").innerHTML = vs.map(v => `<tr data-id="${esc(v.id)}" class="${v.id === state.sel ? "sel" : ""}">
-    <td class="num">${esc(v.seq)}</td>
+    ${linked(v) ? `<td class="num" title="Row ${esc(v.seq)} of this clinic's block in OPD Patients">${esc(v.seq)}</td>`
+      : `<td class="num off" title="${v.log_sig === "new" ? "Not in OPD Patients yet" : "Only in WorkDash (from the old program) - not in OPD Patients"}">–</td>`}
     ${COLS.map(([f, cls, multi]) => `<td class="${cls}">${multi
       ? `<textarea data-f="${f}" rows="1">${esc(v[f])}</textarea>`
       : `<input data-f="${f}" value="${esc(v[f])}">`}</td>`).join("")}
     <td class="decked">${v.decked ? esc(WD.fmt(WD.fromIso(v.decked), "short")) : ""}</td></tr>`).join("");
   $$("#log textarea").forEach(autoGrow);
 }
+const linked = v => String(v.log_sig || "").startsWith("[");
+const editingLog = () => !!(document.activeElement && document.activeElement.closest && document.activeElement.closest("#log tbody"));
 function autoGrow(t) { t.style.height = "auto"; t.style.height = `${t.scrollHeight}px`; }
 
 // ------------------------------------------------------------------ rendering: follow-up planner
@@ -290,11 +297,14 @@ async function deck(dayIso) {
 function removeSelected() {
   const v = selected();
   if (!v) { toast("Click a row first.", "warn"); return; }
-  if (!confirm(`Remove ${v.name} from this logsheet?`)) return;
+  const inSheet = linked(v);
+  if (!confirm(inSheet ? `Remove ${v.name} from this logsheet?\n\nRow ${v.seq} of this clinic's block in OPD Patients will be emptied too.`
+                       : `Remove ${v.name} from this logsheet?`)) return;
   state.visits = state.visits.filter(x => x.id !== v.id);
   state.sel = null; state.plan = null;
   renderAll();
-  api("wd_delete", { id: v.id }).then(() => toast(`Removed ${v.name}.`)).catch(e => toast(`Not removed in the sheet: ${e.message}`, "bad"));
+  if (inSheet) { sync.clears.push({ date: v.visit_date, seq: v.seq, name: v.name }); queueSync(200); }
+  api("wd_delete", { id: v.id }).then(() => toast(`Removed ${v.name}.`)).catch(e => toast(`Not removed from WorkDash's records: ${e.message}`, "bad"));
 }
 
 function search(q) {
@@ -405,43 +415,112 @@ function doPrint(v, st) {
   toast(`Print dialog opening - check the printer and ${S.paper.split(" ")[0]} paper, then press Print.`, "ok", 6000);
 }
 
-// ------------------------------------------------------------------ sync to the Google Sheet logsheet
-async function syncSheet() {
-  const vs = todays();
-  if (!vs.length) { toast("No patients on this logsheet yet.", "warn"); return; }
-  setStatus("Reading OPD Patients…");
-  let sheet;
-  try { sheet = await api("logsheet_read"); } catch (e) { toast(`Couldn't read the Google Sheet: ${e.message}`, "bad", 9000); setStatus(""); return; }
-  setStatus("");
-  const sheetDate = sheet.date_iso ? WD.fromIso(sheet.date_iso) : WD.parseDate(sheet.date_display);
-  if (!sheetDate || WD.iso(sheetDate) !== WD.iso(state.date)) {
-    toast(`Not synced: OPD Patients C37 says ${sheet.date_display || "nothing"}, but this logsheet is ${fmtDay(state.date)}. Add this clinic's logsheet block in the sheet (date in C37), or change the clinic date here.`, "warn", 15000);
-    return;
+// ------------------------------------------------------------------ two-way sync with OPD Patients
+/* The clinic's block in OPD Patients (found by its DATE row, wherever it has moved) and this
+   logsheet are kept the same: typing in either place shows up in the other. See WD.planDaySync. */
+const sync = { busy: false, again: false, loud: false, clears: [], last: 0, timer: null, renderLater: false };
+function queueSync(ms = 1500) { clearTimeout(sync.timer); sync.timer = setTimeout(() => syncDay(), ms); }
+function setSyncLine(html, kind = "") { const el = $("#sync-line"); el.className = `sync-line ${kind}`; el.innerHTML = html; }
+const logObj = v => Object.fromEntries(WD.LOG_FIELDS.map(f => [f, WD.clean(v[f])]));
+
+function guessHno(name) {
+  const k = WD.nameKey(name), found = new Set();
+  if (!k) return "";
+  for (const p of state.patients.values()) if (WD.nameKey(WD.logsheetName(p)) === k) found.add(p.hospital_no);
+  for (const v of state.visits) if (v.hospital_no && WD.nameKey(v.name) === k) found.add(v.hospital_no);
+  return found.size === 1 ? [...found][0] : "";
+}
+
+async function syncDay(loud = false) {
+  if (!connected() || state.loading) return;
+  if (sync.busy) { sync.again = true; sync.loud = sync.loud || loud; return; }
+  sync.busy = true;
+  const dateIso = WD.iso(state.date), day = fmtDay(state.date);
+  try {
+    const blk = await api("log_get", { date_iso: dateIso });
+    if (WD.iso(state.date) !== dateIso) return;              // the date was changed meanwhile
+    if (!blk.found) {
+      const msg = `Not linked to the Google Sheet: OPD Patients has no block dated ${esc(day)}` +
+        (blk.latest_display ? ` (its newest block, C37, is ${esc(blk.latest_display)})` : "") +
+        `. Add this clinic's block there and WorkDash fills it in.`;
+      setSyncLine(msg, "warn");
+      if (loud) toast(msg.replace(/<[^>]+>/g, ""), "warn", 10000);
+      return;
+    }
+    const rows = `${blk.first_row}–${blk.first_row + 11}`;
+    if (blk.copied) {
+      const msg = `Waiting: the OPD Patients block for ${esc(day)} still has the last clinic's patients (copied from the block below). Clear A${blk.first_row}:L${blk.first_row + 12} in the sheet, then WorkDash fills it in.`;
+      setSyncLine(msg, "warn");
+      if (loud) toast(msg, "warn", 12000);
+      return;
+    }
+    const vs = todays(), snap = new Map(vs.map(v => [v.id, logObj(v)]));
+    const clears = sync.clears.filter(c => c.date === dateIso);
+    const p = WD.planDaySync(vs, blk.values, clears);
+    sync.clears = sync.clears.filter(c => c.date !== dateIso);
+
+    // 1. the sheet
+    let res = { written: [], conflicts: [], cells: 0 };
+    if (p.push.length) {
+      try { res = await api("log_put", { date_iso: dateIso, writes: p.push.map(w => ({ seq: w.seq, expect: w.expect, values: w.values })) }); }
+      catch (e) { if (e.message === "no_block") { setSyncLine(`The block dated ${esc(day)} just moved or was removed in OPD Patients - syncing again.`, "warn"); sync.again = true; return; } throw e; }
+    }
+    const written = new Set(res.written || []);
+
+    // 2. WorkDash (never undoing typing that happened while this sync was running)
+    const toSave = new Set(), find = id => state.visits.find(x => x.id === id);
+    for (const l of p.local) {
+      const v = find(l.id); if (!v) continue;
+      const before = snap.get(v.id) || {};
+      for (const [f, val] of Object.entries(l.fields)) if (WD.clean(v[f]) === before[f]) v[f] = val;
+      v.seq = l.seq;
+      if (l.sig) v.log_sig = l.sig;
+      toSave.add(v);
+    }
+    for (const w of p.push) {
+      if (!w.id || !written.has(w.seq)) continue;
+      const v = find(w.id); if (!v) continue;
+      v.log_sig = w.sig; v.seq = String(w.seq); toSave.add(v);
+    }
+    for (const a of p.add) {
+      const v = { id: crypto.randomUUID ? crypto.randomUUID() : `v${Date.now()}${Math.random()}`, visit_date: dateIso,
+        seq: a.seq, hospital_no: guessHno(a.fields.name), ...a.fields, decked: "", log_sig: a.sig };
+      state.visits.push(v); toSave.add(v);
+    }
+    const dropIds = new Set(p.drop.map(v => v.id));
+    if (dropIds.size) {
+      state.visits = state.visits.filter(v => !dropIds.has(v.id));
+      if (dropIds.has(state.sel)) { state.sel = null; state.plan = null; }
+    }
+    if (toSave.size) await api("wd_save", { visits: [...toSave].map(v => pick(v, VISIT_FIELDS)) });
+    for (const id of dropIds) await api("wd_delete", { id });
+
+    // 3. tell
+    const nWritten = p.push.filter(w => !w.clear && written.has(w.seq)).length, nCleared = p.push.filter(w => w.clear && written.has(w.seq)).length;
+    const nIn = p.add.length + p.local.filter(l => Object.keys(l.fields).length).length;
+    const bits = [];
+    if (nWritten) bits.push(`${nWritten} row(s) written to the sheet`);
+    if (nCleared) bits.push(`${nCleared} row(s) emptied in the sheet`);
+    if (nIn) bits.push(`${nIn} change(s) brought in from the sheet`);
+    if (p.drop.length) bits.push(`${p.drop.length} removed here (emptied in the sheet)`);
+    const warn = [];
+    if ((res.conflicts || []).length) warn.push(`${res.conflicts.length} row(s) changed in the sheet at the same moment - syncing again`);
+    if (p.overflow.length) warn.push(`no empty row left for ${p.overflow.map(v => esc(v.name)).join(", ")} - add rows to the block or remove someone`);
+    if (p.conflicts.length) warn.push(`${p.conflicts.map(v => esc(v.name)).join(", ")}: the same cell was edited in both places - kept WorkDash's`);
+    const only = p.localOnly.length ? ` · ${p.localOnly.length} only in WorkDash (–)` : "";
+    setSyncLine(`↔ Linked to OPD Patients rows ${rows} (${esc(blk.date_display || day)}) · synced ${new Date().toLocaleTimeString()}${only}` +
+      (warn.length ? `<br>⚠ ${warn.join("<br>⚠ ")}` : ""), warn.length ? "warn" : "ok");
+    if (loud || nCleared || p.add.length || p.drop.length || warn.length)          // routine writes show only in the line
+      toast(bits.length || warn.length ? [...bits, ...warn].join(" · ").replace(/<[^>]+>/g, "") : "Already the same as the Google Sheet.", warn.length ? "warn" : "ok", 8000);
+    if ((res.conflicts || []).length) sync.again = true;
+    if (toSave.size || dropIds.size) { if (editingLog()) sync.renderLater = true; else renderAll(); }
+  } catch (e) {
+    setSyncLine(`Not synced with the Google Sheet: ${esc(e.message)}`, "bad");
+    if (loud) toast(`Not synced: ${e.message}`, "bad", 9000);
+  } finally {
+    sync.busy = false; sync.last = Date.now();
+    if (sync.again) { const l = sync.loud; sync.again = false; sync.loud = false; setTimeout(() => syncDay(l), 400); }
   }
-  const { writes, overflow } = WD.planLogsheetSync(vs, sheet.values, sheet.first_row || 39);
-  openDialog(`<h3>Sync to OPD Patients · ${esc(sheet.date_display)}</h3>
-    <div class="ok">C37 matches this logsheet's date.</div>
-    ${writes.map(w => `<div>Row ${w.row}: ${esc(w.name)} (${w.update ? "updates the row already there" : "new"})</div>`).join("")}
-    ${overflow.map(o => `<div class="warn">⚠ ${esc(o.name)}: no empty numbered row left in this block - add rows in the sheet</div>`).join("")}
-    <div class="hint">Only columns A–L of those rows are written. Nothing else in the sheet changes.</div>
-    <div class="actions"><button data-close>Cancel</button>${writes.length ? `<button class="primary" id="s-go">Write ${writes.length} row(s)</button>` : ""}</div>`, d => {
-    d.onclick = async ev => {
-      if (ev.target.hasAttribute("data-close")) closeDialog();
-      if (ev.target.id !== "s-go") return;
-      closeDialog();
-      setStatus("Writing to the Google Sheet…");
-      try {
-        const res = await api("logsheet_write", { date_iso: sheet.date_iso || "", date_display: sheet.date_display || "",
-          writes: writes.map(w => ({ row: w.row, expect: w.expect, values: w.values })) });
-        if (!res.ok) { toast(`Not synced: C37 now says ${res.date_display}.`, "warn", 9000); return; }
-        const done = res.written || [], skipped = res.conflicts || [];
-        let msg = done.length ? `Synced ${done.length} row(s) to OPD Patients (rows ${done.join(", ")}).` : "Nothing was written.";
-        if (skipped.length) msg += ` ${skipped.length} row(s) changed in the sheet meanwhile and were skipped - press Sync again.`;
-        toast(msg, done.length && !skipped.length ? "ok" : "warn", 9000);
-      } catch (e) { toast(`Not synced: ${e.message}`, "bad", 9000); }
-      finally { setStatus(""); }
-    };
-  });
 }
 
 // ------------------------------------------------------------------ settings / setup
@@ -534,13 +613,15 @@ function wire() {
     const d = WD.fromIso(dateIn.value);
     if (!d) return;
     state.date = d; state.sel = null; state.plan = null; state.justDecked = null;
+    setSyncLine("Checking the Google Sheet…");
     renderAll(true);
+    syncDay();
   };
   $("#btn-reload").onclick = () => loadAll();
   $("#btn-settings").onclick = openSettings;
   $("#btn-add").onclick = () => { const t = $("#paste").value; if (t.trim()) { addFromBlock(t); $("#paste").value = ""; } };
   $("#btn-copy").onclick = () => { const vs = todays(); vs.length ? copyText(WD.logsheetTsv(vs), `Copied ${vs.length} rows. In OPD Patients click the NAME cell (column B) of the first empty row and paste.`) : toast("No patients on this logsheet yet.", "warn"); };
-  $("#btn-sync").onclick = syncSheet;
+  $("#btn-sync").onclick = () => syncDay(true);
   $("#btn-print").onclick = openPrint;
   $("#btn-remove").onclick = removeSelected;
   $("#btn-rawdata").onclick = () => {
@@ -563,6 +644,7 @@ function wire() {
 
   const tbody = $("#log tbody");
   tbody.addEventListener("focusin", ev => selectRow(ev.target.closest("tr")));
+  tbody.addEventListener("focusout", () => setTimeout(() => { if (sync.renderLater && !editingLog()) { sync.renderLater = false; renderAll(); } }, 0));
   tbody.addEventListener("click", ev => selectRow(ev.target.closest("tr")));
   tbody.addEventListener("input", ev => {
     const t = ev.target, tr = t.closest("tr"), v = tr && state.visits.find(x => x.id === tr.dataset.id);
@@ -582,6 +664,12 @@ function wire() {
     if (text && WD.looksLikePatientBlock(text)) { ev.preventDefault(); addFromBlock(text); if (t && t.id === "paste") t.value = ""; }
   });
   dlg.addEventListener("close", () => { dlg.innerHTML = ""; });
+
+  // pick up what was typed in the Google Sheet: on coming back to this tab, and every 2 minutes
+  window.addEventListener("focus", () => { if (Date.now() - sync.last > 10000) syncDay(); });
+  setInterval(() => {
+    if (document.visibilityState === "visible" && !dlg.open && !editingLog() && Date.now() - sync.last > 115000) syncDay();
+  }, 30000);
 }
 
 function selectRow(tr) {

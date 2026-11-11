@@ -104,6 +104,54 @@ test("logsheet sync never spills", () => {
   const { writes, overflow } = WD.planLogsheetSync([{ name: "A, ONE" }, { name: "B, TWO" }], block(Object.fromEntries([...Array(11).keys()].map(i => [i, `P${i}, X`]))));
   eq(writes.map(w => w.row), [50]); eq(overflow.map(o => o.name), ["B, TWO"]);
 });
+// ---- two-way sync with an OPD Patients block
+const R = (seq, name, dx = "", fu = "") => [String(seq), name, name ? "50/F" : "", "", dx, "", name ? "O" : "", "", name ? "DR BACUS" : "", name ? "DR AMPATI" : "", name ? "DISCHARGE" : "", fu];
+const blk = (...named) => Array.from({ length: 12 }, (_, i) => named[i] ? R(i + 1, ...named[i]) : R(i + 1, ""));
+const V = (id, seq, name, dx = "", fu = "", sig = "") => ({ id, seq: String(seq), name, age_sex: "50/F", cc: "", dx, other: "", nor: "O", ref_dept: "",
+  resident: "DR BACUS", consultant: "DR AMPATI", dispo: "DISCHARGE", followup: fu, log_sig: sig });
+const sigOf = (name, dx = "", fu = "") => JSON.stringify(R(0, name, dx, fu).slice(1));
+test("two-way: typed in the sheet comes in; old data takes the sheet's values", () => {
+  const p = WD.planDaySync([V("a", 1, "REYES, ANA", "OLD DX")], blk(["Reyes, Ana", "EPILEPSY"], ["CRUZ, BEN", "MIGRAINE"]));
+  eq(p.push, []); eq(p.local.map(l => [l.id, l.seq, l.fields]), [["a", "1", { name: "Reyes, Ana", dx: "EPILEPSY" }]]);
+  eq(p.add.map(a => [a.seq, a.fields.name, a.fields.dx]), [["2", "CRUZ, BEN", "MIGRAINE"]]);
+});
+test("two-way: added in WorkDash goes to the first empty row", () => {
+  const p = WD.planDaySync([V("n", 1, "SANTOS, MARIA", "CVD", "", "new")], blk(["CRUZ, BEN"], null, ["DIAZ, CARL"]));
+  eq(p.push.map(w => [w.seq, w.expect, w.values[1], w.values[4]]), [[2, "", "SANTOS, MARIA", "CVD"]]);
+  eq(p.add.map(a => a.seq), ["1", "3"]);
+});
+test("two-way: an edit on one side goes to the other", () => {
+  const vs = [V("a", 1, "REYES, ANA", "EPILEPSY", "3MOS", sigOf("REYES, ANA", "EPILEPSY", "")), V("b", 2, "CRUZ, BEN", "MIGRAINE", "", sigOf("CRUZ, BEN", "MIGRAINE"))];
+  const p = WD.planDaySync(vs, blk(["REYES, ANA", "EPILEPSY", ""], ["CRUZ, BEN", "TENSION HEADACHE"]));
+  eq(p.push.map(w => [w.seq, w.values[11]]), [[1, "3MOS"]]);                         // WorkDash's follow-up -> sheet
+  eq(p.local.filter(l => Object.keys(l.fields).length).map(l => [l.id, l.fields]), [["b", { dx: "TENSION HEADACHE" }]]);   // sheet's dx -> WorkDash
+  eq(p.conflicts, []);
+});
+test("two-way: both sides edited - fields merge, same field keeps WorkDash's", () => {
+  const vs = [V("a", 1, "REYES, ANA", "FOCAL EPILEPSY", "6MOS", sigOf("REYES, ANA", "EPILEPSY", "3MOS"))];
+  const p = WD.planDaySync(vs, blk(["REYES, ANA", "EPILEPSY", "2MOS"]));
+  eq(p.push[0].values.slice(1), R(0, "REYES, ANA", "FOCAL EPILEPSY", "6MOS").slice(1)); eq(p.conflicts.map(v => v.id), ["a"]);
+  const q = WD.planDaySync([V("a", 1, "REYES, ANA", "FOCAL EPILEPSY", "3MOS", sigOf("REYES, ANA", "EPILEPSY", "3MOS"))], blk(["REYES, ANA", "EPILEPSY", "2MOS"]));
+  eq(q.push[0].values[4], "FOCAL EPILEPSY"); eq(q.push[0].values[11], "2MOS"); eq(q.conflicts, []);
+  eq(q.local[0].fields, { followup: "2MOS" });
+});
+test("two-way: emptied in the sheet is removed here; edited here is put back", () => {
+  const vs = [V("a", 1, "REYES, ANA", "", "", sigOf("REYES, ANA")), V("b", 2, "CRUZ, BEN", "NEW DX", "", sigOf("CRUZ, BEN"))];
+  const p = WD.planDaySync(vs, blk());
+  eq(p.drop.map(v => v.id), ["a"]); eq(p.push.map(w => [w.seq, w.values[1], w.expect]), [[1, "CRUZ, BEN", ""]]);
+});
+test("two-way: removing here empties the row, and it isn't brought back", () => {
+  const p = WD.planDaySync([], blk(["REYES, ANA"], ["CRUZ, BEN"]), [{ seq: "1", name: "REYES, ANA" }, { seq: "2", name: "SOMEONE, ELSE" }]);
+  eq(p.push.map(w => [w.seq, w.clear, w.expect, w.values.slice(1).join("")]), [[1, true, "REYES, ANA", ""]]);
+  eq(p.add.map(a => a.fields.name), ["CRUZ, BEN"]);                                   // row 2 holds someone else now: left alone
+});
+test("two-way: moved rows, full blocks, and old data the sheet doesn't have", () => {
+  const p = WD.planDaySync([V("a", 1, "REYES, ANA", "", "", sigOf("REYES, ANA"))], blk(null, null, ["REYES, ANA"]));
+  eq(p.local.map(l => [l.seq, l.fields]), [["3", {}]]); eq(p.push, []);
+  const full = blk(...Array.from({ length: 12 }, (_, i) => [`P${i}, X`]));
+  const q = WD.planDaySync([V("n", 0, "NEW, ONE", "", "", "new"), V("o", 3, "GONE, OLD", "", "", "")], full);
+  eq(q.overflow.map(v => v.id), ["n"]); eq(q.localOnly.map(v => v.id), ["o"]); eq(q.push, []); eq(q.add.length, 12);
+});
 test("forms: lab ticks, escaping, S2 copies, page sizes", () => {
   const P = { hospital_no: "1234567", last: "DELA CRUZ", first: "JUAN", middle: "SANTOS", sex: "MALE", birthdate: "1969-11-15", age: 56, address: "1 SAMPLE ST <TEST>, QUEZON CITY", dx: "EPILEPSY" };
   const V = { name: "DELA CRUZ, JUAN", followup: "2MOS 1WK", decked: "2027-01-19", dx: "FOCAL EPILEPSY" };

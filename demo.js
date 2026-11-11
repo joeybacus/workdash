@@ -46,6 +46,9 @@ const Demo = (() => {
   // ---- the newest logsheet block in "OPD Patients": DATE in C37, patients from row 39
   const logDate = WD.today();
   const logRows = Array.from({ length: 30 }, (_, i) => i < 12 ? [String(i + 1), ...Array(11).fill("")] : Array(12).fill(""));
+  // two patients "typed straight into the sheet", to show the two-way sync bringing them in
+  logRows[0] = ["1", "MENDOZA, CARMEN", "61/F", "", "CHRONIC CVD INFARCT, MRS 1", "HYPERTENSION", "O", "", "DR BACUS", "DR AMPATI", "DISCHARGE", "3MOS"];
+  logRows[1] = ["2", "VILLANUEVA, NENA", "38/F", "HEADACHE", "MIGRAINE WITHOUT AURA", "", "N", "", "DR BACUS", "DR AMPATI", "DISCHARGE", "1MO"];
 
   const ok = x => ({ ok: true, ...x });
   const copy = x => JSON.parse(JSON.stringify(x));
@@ -76,10 +79,29 @@ const Demo = (() => {
           }
           return ok({ written, conflicts, date_display: WD.fmt(logDate, "full") });
         }
+        case "log_get": {
+          if (b.date_iso !== WD.iso(logDate)) return ok({ found: false, latest_iso: WD.iso(logDate), latest_display: WD.fmt(logDate, "long") });
+          return ok({ found: true, date_row: 37, first_row: 39, date_display: WD.fmt(logDate, "long"), copied: false,
+            latest_iso: WD.iso(logDate), latest_display: WD.fmt(logDate, "long"), values: copy(logRows.slice(0, 12)) });
+        }
+        case "log_put": {
+          if (b.date_iso !== WD.iso(logDate)) return { ok: false, error: "no_block" };
+          const written = [], conflicts = [];
+          let cells = 0;
+          for (const w of b.writes || []) {
+            const i = +w.seq - 1;
+            if (!(i >= 0 && i < 12)) { conflicts.push({ seq: w.seq, now: "row out of range" }); continue; }
+            if (String(logRows[i][1]).trim() !== String(w.expect || "").trim()) { conflicts.push({ seq: w.seq, now: logRows[i][1] }); continue; }
+            const vals = [String(i + 1), ...w.values.slice(1).map(String)];
+            vals.forEach((x, j) => { if (x.trim() !== String(logRows[i][j]).trim()) { logRows[i][j] = x; cells++; } });
+            written.push(+w.seq);
+          }
+          return ok({ written, conflicts, cells, first_row: 39 });
+        }
         case "wd_bootstrap": return ok({ visits: copy(visits), patients: copy(patients) });
         case "wd_save": {
           if (b.patient) { const i = patients.findIndex(p => p.hospital_no === b.patient.hospital_no); i >= 0 ? patients[i] = copy(b.patient) : patients.push(copy(b.patient)); }
-          if (b.visit) { const i = visits.findIndex(v => v.id === b.visit.id); i >= 0 ? visits[i] = copy(b.visit) : visits.push(copy(b.visit)); }
+          for (const x of [b.visit, ...(b.visits || [])].filter(Boolean)) { const i = visits.findIndex(v => v.id === x.id); i >= 0 ? visits[i] = copy(x) : visits.push(copy(x)); }
           return ok();
         }
         case "wd_delete": { const i = visits.findIndex(v => v.id === b.id); if (i >= 0) visits.splice(i, 1); return ok({ deleted: i >= 0 ? 1 : 0 }); }
@@ -90,5 +112,5 @@ const Demo = (() => {
     return new Promise(res => setTimeout(() => res(reply), 120 + Math.random() * 150));   // feels like the network
   }
 
-  return { call };
+  return { call, sheetRows: () => copy(logRows.slice(0, 12)) };   // sheetRows: for tests
 })();
