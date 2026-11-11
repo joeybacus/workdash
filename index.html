@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>WorkDash · Neuro OPD</title>
+  <link rel="icon" type="image/png" href="logo.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><img src="logo.png" alt=""><span>WorkDash</span><small>Neuro OPD</small></div>
+    <label class="clinic-date">Clinic date <input type="date" id="clinic-date"></label>
+    <span id="count" class="muted"></span>
+    <span class="grow"></span>
+    <span id="mode" class="badge" hidden>DEMO · made-up patients</span>
+    <span id="status" class="muted small"></span>
+    <button id="btn-reload" class="icon" title="Reload from Google Sheets" aria-label="Reload">⟳</button>
+    <button id="btn-settings" class="icon" title="Settings" aria-label="Settings">⚙</button>
+  </header>
+
+  <main class="layout">
+    <section class="col-main">
+      <div class="card">
+        <div class="row">
+          <h2>Add a patient</h2>
+          <span class="grow"></span>
+          <span class="hint">Copy the Patient Information block in WebHOMIS, then press <kbd>Ctrl</kbd>+<kbd>V</kbd> anywhere on this page.</span>
+        </div>
+        <div class="row stretch">
+          <textarea id="paste" rows="3" placeholder="…or paste it here (Hospital No. : … Diagnosis :)"></textarea>
+          <button id="btn-add" class="primary">Add</button>
+        </div>
+        <input id="search" type="search" placeholder="Returning patient? Search name or hospital no." autocomplete="off">
+        <div id="search-results"></div>
+      </div>
+
+      <div class="card">
+        <div class="row wrap">
+          <h2 id="log-title">OPD logsheet</h2>
+          <span class="grow"></span>
+          <button id="btn-copy" title="Tab-separated rows for pasting into the logsheet at column B">Copy rows</button>
+          <button id="btn-sync" title="Writes this logsheet into OPD Patients (from row 39) when C37 has this date">Sync to Sheet</button>
+          <button id="btn-print" class="primary">Print forms</button>
+        </div>
+        <div class="row small-buttons">
+          <button id="btn-rawdata" class="link" title="For RawData!A5 in the Google Sheet">RawData block</button>
+          <button id="btn-remove" class="link danger">Remove selected</button>
+        </div>
+        <div class="table-wrap">
+          <table id="log">
+            <thead><tr>
+              <th>#</th><th>Name</th><th>Age/Sex</th><th>Chief complaint</th><th>Diagnosis</th><th>Other illness</th>
+              <th>N/O/R</th><th>Ref. dept</th><th>Resident</th><th>Consultant</th><th>Disposition</th><th>Follow-up</th><th>Decked</th>
+            </tr></thead>
+            <tbody></tbody>
+          </table>
+          <div id="log-empty" class="empty">No patients on this logsheet yet.</div>
+        </div>
+        <div class="hint">Click a row to plan its follow-up. Type in any cell to edit it; changes save by themselves.</div>
+      </div>
+    </section>
+
+    <aside class="col-side">
+      <div class="card" id="card-fu">
+        <h2 id="fu-title">Follow-up</h2>
+        <div class="row">
+          <label class="num">Months <input type="number" id="fu-months" min="0" max="24" value="6"></label>
+          <label class="num">Weeks <input type="number" id="fu-weeks" min="0" max="52" value="0"></label>
+          <button id="btn-plan" class="primary">Find Tuesday</button>
+        </div>
+        <div id="plan"></div>
+      </div>
+      <div class="card" id="card-hist" hidden></div>
+      <div class="card" id="card-sched"></div>
+    </aside>
+  </main>
+
+  <dialog id="dlg"></dialog>
+  <div id="toasts" aria-live="polite"></div>
+
+  <script src="core.js"></script>
+  <script src="forms.js"></script>
+  <script src="demo.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

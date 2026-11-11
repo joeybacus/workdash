@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="robots" content="noindex"><title>WorkDash tests</title>
+<style>body{font:14px system-ui;margin:20px} .ok{color:#15803d} .bad{color:#b91c1c;font-weight:bold} pre{background:#f1f5f9;padding:8px}</style>
+</head><body>
+<h1>WorkDash tests</h1><div id="out"></div>
+<script src="core.js"></script><script src="forms.js"></script>
+<script>
+"use strict";
+const results = [];
+function test(name, fn) { try { fn(); results.push([name, null]); } catch (e) { results.push([name, e.message]); } }
+function eq(a, b, msg) { const A = JSON.stringify(a), B = JSON.stringify(b); if (A !== B) throw new Error(`${msg || ""} expected ${B} got ${A}`); }
+function ok(c, msg) { if (!c) throw new Error(msg || "not true"); }
+const D = (y, m, d) => new Date(y, m - 1, d);
+
+const BLOCK = `Location:\nPatient Information\nHospital No. :\n1234567\nLast Name :\nDELA CRUZ\nFirst Name :\nJUAN MIGUEL\nMiddle Name :\nSANTOS\nGender :\nMALE\nBirthdate :\n11/15/1969\nAge :\n56\nReligion :\nCATHOLIC\nAddress :\n1 SAMPLE ST, QUEZON CITY, METRO MANILA\nDate / Time Logged :\n11/10/2026 08:15:00 AM\nRoom / Section :\nOUTPATIENT DEPARTMENT - NEUROLOGY-N\nDiagnosis :\nFOLLOW UP\n\nCHRONIC CVD INFARCT, MRS 1\n`;
+const SAME_LINE = "Hospital No. :\t7654321\nLast Name : SANTOS\nFirst Name :\tANA\nGender : FEMALE\nBirthdate : Mar 3, 1974\nDiagnosis :\nEPILEPSY\n";
+
+test("parse block (lines)", () => {
+  const p = WD.parsePatientBlock(BLOCK);
+  eq([p.hospital_no, p.last, p.first, p.middle, p.sex, p.birthdate, p.age], ["1234567", "DELA CRUZ", "JUAN MIGUEL", "SANTOS", "MALE", "1969-11-15", 56]);
+  eq([p.logged, p.adm_dx, p.dx], ["2026-11-10 08:15:00", "FOLLOW UP", "CHRONIC CVD INFARCT, MRS 1"]);
+  eq(WD.logsheetName(p), "DELA CRUZ, JUAN MIGUEL");
+  eq(WD.ageSex(p, D(2026, 11, 10)), "56/M"); eq(WD.ageSex(p, D(2026, 11, 20)), "57/M");
+});
+test("parse block (same line) + detection", () => {
+  const p = WD.parsePatientBlock(SAME_LINE);
+  eq([p.hospital_no, p.last, p.first, p.sex, p.birthdate, p.dx], ["7654321", "SANTOS", "ANA", "FEMALE", "1974-03-03", "EPILEPSY"]);
+  ok(WD.looksLikePatientBlock(BLOCK)); ok(!WD.looksLikePatientBlock("Last Name : x\nsome other text"));
+  let threw = false; try { WD.parsePatientBlock("hello"); } catch { threw = true; } ok(threw, "should reject");
+});
+test("rawdata block round trip (28 lines)", () => {
+  const p = WD.parsePatientBlock(BLOCK), lines = WD.rawdataBlock(p).split("\n");
+  eq(lines.length, 28); eq([lines[0], lines[2], lines[24], lines[27]], ["Location:", "Hospital No. :", "Diagnosis :", p.dx]);
+  eq(WD.parsePatientBlock(WD.rawdataBlock(p)), p);
+});
+test("name keys", () => {
+  eq(WD.nameKey("%#Quintos, Jr., Benedicto"), "QUINTOS|BENEDICTO"); eq(WD.nameKey("QUINTOS, BENEDICTO M"), "QUINTOS|BENEDICTO");
+  eq(WD.nameKey("¤PEÑAFLOR, LUZ"), "PENAFLOR|LUZ");
+  ok(WD.samePerson("/Orbeta, Lorenzo ", "ORBETA, LORENZO")); ok(!WD.samePerson("ORBETA, LORENZO", "ORBETA, MARIA"));
+});
+test("follow-up text", () => {
+  eq(WD.parseFollowup("6MOS"), [6, 0]); eq(WD.parseFollowup("3 MONTHS"), [3, 0]); eq(WD.parseFollowup("2wks"), [0, 2]);
+  eq(WD.parseFollowup("2m3w"), [2, 3]); eq(WD.parseFollowup("1 yr"), [12, 0]); eq(WD.parseFollowup("PRN"), null);
+  eq(WD.formatFollowup(1, 0), "1MO"); eq(WD.formatFollowup(2, 3), "2MOS 3WKS"); eq(WD.followupWords(2, 1), "2 MONTHS 1 WEEK");
+});
+test("add months clamps", () => { eq(WD.iso(WD.addMonths(D(2027, 1, 31), 1)), "2027-02-28"); eq(WD.iso(WD.addMonths(D(2026, 11, 10), 2)), "2027-01-10"); });
+
+function grid(days, notes = {}) {
+  const g = Array.from({ length: 37 }, () => Array(days.length + 1).fill(""));
+  g[0][0] = "Els";
+  days.forEach(([h, names], i) => { g[0][i + 1] = h; g[1][i + 1] = notes[h] || ""; names.forEach((n, r) => { g[2 + r][i + 1] = n; }); });
+  return WD.parseSchedule(g, { today: D(2026, 11, 10) });
+}
+const names = (n, t = "P") => Array.from({ length: n }, (_, i) => `${t}${i}, X`);
+
+test("schedule years + holidays", () => {
+  const s = grid([["December 22", []], ["December 29", []], ["Column 66", []], ["January 5", []], ["March 9, 2027", []]], { "Column 66": "2027", "March 9, 2027": "Eid'l Fitr" });
+  eq(s.days.map(d => WD.iso(d.date)), ["2026-12-22", "2026-12-29", "2027-01-05", "2027-03-09"]);
+  eq(s.days[3].blocked, "Eid'l Fitr"); ok(s.badHeaders[0].includes("Column 66"));
+  ok(grid([["December 8", []]]).days[0].blocked.startsWith("Feast"));
+});
+test("plan basic + free row", () => {
+  const s = grid([["November 17", names(2)], ["November 24", names(3)], ["December 1", ["A, B"]]]);
+  const p = WD.planFollowup(s, "NEW, ONE", 0, 2, D(2026, 11, 10));
+  eq(WD.iso(p.chosen.date), "2026-11-24"); eq(p.row, 6); ok(!p.over_preferred); eq(s.days[2].free_row, 5);
+  WD.addToSchedule(p.chosen, p.row, "NEW, ONE"); eq([p.chosen.names.length, p.chosen.free_row], [4, 7]);
+});
+test("plan skips full, blocked and past", () => {
+  const s = grid([["November 3", []], ["November 17", []], ["November 24", names(7)], ["December 1", names(2)]], { "November 17": "ASEAN Summit" });
+  const p = WD.planFollowup(s, "NEW, ONE", 0, 1, D(2026, 11, 10));
+  eq(WD.iso(p.chosen.date), "2026-12-01"); ok(p.warnings.some(w => w.includes("ASEAN")));
+});
+test("plan falls back to cap, then none", () => {
+  let p = WD.planFollowup(grid([["November 17", names(6)], ["November 24", names(7)]]), "NEW, ONE", 0, 1, D(2026, 11, 10));
+  eq(WD.iso(p.chosen.date), "2026-11-17"); ok(p.over_preferred);
+  p = WD.planFollowup(grid([["November 17", names(8)], ["November 24", names(9)]]), "NEW, ONE", 0, 1, D(2026, 11, 10));
+  ok(p.chosen === null && p.warnings.length);
+});
+test("plan warns already decked / beyond sheet", () => {
+  const s = grid([["November 17", ["%DELA CRUZ, JUAN"]], ["November 24", []]]);
+  let p = WD.planFollowup(s, "DELA CRUZ, JUAN MIGUEL", 0, 2, D(2026, 11, 10));
+  ok(p.already.length && p.warnings.some(w => w.includes("Already decked")));
+  p = WD.planFollowup(s, "X, Y", 6, 0, D(2026, 11, 10));
+  ok(p.chosen === null && p.warnings.some(w => w.includes("schedule ends")));
+});
+test("schedule problems", () => {
+  const s = grid([["November 17", names(2)], ["November 24", [...names(9), "DUP, ONE"]], ["December 1", ["Dup, One"]]], { "November 17": "ASEAN Summit" });
+  const t = WD.scheduleProblems(s, {}, D(2026, 11, 10)).join("\n");
+  ok(t.includes("blocked day (ASEAN Summit)") && t.includes("10 patients") && t.includes("DUP, ONE: decked 2"), t);
+});
+function block(rows) {
+  const out = [...Array.from({ length: 12 }, (_, i) => [String(i + 1), ...Array(11).fill("")]), Array(12).fill(""), ["", "", "QUIRINO", ...Array(9).fill("")]];
+  Object.entries(rows).forEach(([i, n]) => { out[i][1] = n; }); return out;
+}
+test("logsheet sync fills and updates", () => {
+  const vis = [{ name: "SANTOS, MARIA", age_sex: "56/F", dx: "CHRONIC CVD MRS 2", nor: "O", resident: "DR BACUS", consultant: "DR AMPATI", dispo: "DISCHARGE", followup: "6MOS" },
+    { name: "DELA CRUZ, JUAN", age_sex: "56/M", dx: "EPILEPSY" }];
+  const { writes, overflow } = WD.planLogsheetSync(vis, block({ 0: "TYPED BY HAND, ANA", 2: "%Santos, Maria V." }));
+  eq(overflow.length, 0);
+  eq(writes.map(w => [w.row, w.update, w.expect]), [[41, true, "%Santos, Maria V."], [40, false, ""]]);
+  eq(writes[0].values.slice(0, 4), [3, "SANTOS, MARIA", "56/F", ""]); eq(writes[0].values.length, 12); eq(writes[0].values[11], "6MOS");
+});
+test("logsheet sync never spills", () => {
+  const { writes, overflow } = WD.planLogsheetSync([{ name: "A, ONE" }, { name: "B, TWO" }], block(Object.fromEntries([...Array(11).keys()].map(i => [i, `P${i}, X`]))));
+  eq(writes.map(w => w.row), [50]); eq(overflow.map(o => o.name), ["B, TWO"]);
+});
+test("forms: lab ticks, escaping, S2 copies, page sizes", () => {
+  const P = { hospital_no: "1234567", last: "DELA CRUZ", first: "JUAN", middle: "SANTOS", sex: "MALE", birthdate: "1969-11-15", age: 56, address: "1 SAMPLE ST <TEST>, QUEZON CITY", dx: "EPILEPSY" };
+  const V = { name: "DELA CRUZ, JUAN", followup: "2MOS 1WK", decked: "2027-01-19", dx: "FOCAL EPILEPSY" };
+  let h = Forms.buildHtml(V, P, {}, { date: D(2026, 11, 10), lab: true, lab_tests: new Set(["chem.fbs", "cm.urinalysis"]), lab_other: "HbA1c" });
+  ok((h.match(/class="cb on"/g) || []).length === 2, "2 ticks"); ok(h.includes("DELA CRUZ, JUAN SANTOS") && h.includes("11/15/1969") && h.includes("11/10/26"));
+  h = Forms.buildHtml(V, P, {}, { date: D(2026, 11, 10), rx: true, rx_meds: "Levetiracetam <b>1 tab</b>" });
+  ok(h.includes("&lt;b&gt;1 tab&lt;/b&gt;") && h.includes("1 SAMPLE ST &lt;TEST&gt;"), "escaped");
+  ok(h.includes("2 MONTHS 1 WEEK — Tue, Jan 19, 2027"), "follow-up line"); ok(h.includes("FOCAL EPILEPSY"));
+  h = Forms.buildHtml(V, P, { s2_no: "S2-TEST-0001" }, { date: D(2026, 11, 10), s2: true });
+  eq((h.match(/S2 No\.: S2-TEST-0001/g) || []).length, 3); eq((h.match(/ADDRESS: 1 SAMPLE ST/g) || []).length, 3);
+  ok(Forms.buildHtml(V, P, { paper: "A4" }, { date: D(2026, 11, 10), lab: true }).includes("@page { size: 8.27in 11.69in; margin: 0; }"));
+  eq((Forms.buildHtml(V, P, { paper: "A4", lab_per_page: 2 }, { date: D(2026, 11, 10), lab: true }).match(/LABORATORY REQUEST FORM/g) || []).length, 1);
+  eq((Forms.buildHtml(V, P, { lab_per_page: 2 }, { date: D(2026, 11, 10), lab: true }).match(/LABORATORY REQUEST FORM/g) || []).length, 2);
+});
+
+const bad = results.filter(r => r[1]);
+document.getElementById("out").innerHTML = `<p class="${bad.length ? "bad" : "ok"}" id="summary">${results.length - bad.length}/${results.length} passed</p>` +
+  results.map(([n, err]) => `<div class="${err ? "bad" : "ok"}">${err ? "✗" : "✓"} ${n}${err ? `<pre>${err}</pre>` : ""}</div>`).join("");
+window.TEST_RESULTS = { passed: results.length - bad.length, failed: bad };
+</script></body></html>
