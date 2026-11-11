@@ -161,7 +161,7 @@ function patientForVisit(v) {
 }
 
 // ------------------------------------------------------------------ rendering: logsheet
-const COLS = [["name", "w-name"], ["age_sex", "w-s"], ["cc", "w-m"], ["dx", "w-dx", true], ["other", "w-m"], ["nor", "w-s"],
+const COLS = [["name", "w-name"], ["age_sex", "w-s"], ["cc", "w-m"], ["dx", "w-dx"], ["other", "w-m"], ["nor", "w-s"],
   ["ref_dept", "w-m"], ["resident", "w-m"], ["consultant", "w-m"], ["dispo", "w-m"], ["followup", "w-s"]];
 
 function renderLog() {
@@ -173,11 +173,22 @@ function renderLog() {
   $("#log tbody").innerHTML = vs.map(v => `<tr data-id="${esc(v.id)}" class="${v.id === state.sel ? "sel" : ""}">
     ${linked(v) ? `<td class="num" title="Row ${esc(v.seq)} of this clinic's block in OPD Patients">${esc(v.seq)}</td>`
       : `<td class="num off" title="${v.log_sig === "new" ? "Not in OPD Patients yet" : "Only in WorkDash (from the old program) - not in OPD Patients"}">–</td>`}
-    ${COLS.map(([f, cls, multi]) => `<td class="${cls}">${multi
-      ? `<textarea data-f="${f}" rows="1">${esc(v[f])}</textarea>`
-      : `<input data-f="${f}" value="${esc(v[f])}">`}</td>`).join("")}
-    <td class="decked">${v.decked ? esc(WD.fmt(WD.fromIso(v.decked), "short")) : ""}</td></tr>`).join("");
-  $$("#log textarea").forEach(autoGrow);
+    ${COLS.map(([f, cls]) => `<td class="${cls}"><textarea data-f="${f}" rows="1" spellcheck="false">${esc(v[f])}</textarea>${
+      f === "followup" && v.decked ? `<div class="decked" title="Decked in the follow-up schedule">Decked ${esc(WD.fmt(WD.fromIso(v.decked), "short"))}</div>` : ""}</td>`).join("")}</tr>`).join("");
+  fitCols(); growAll();
+}
+const growAll = () => $$("#log textarea").forEach(autoGrow);     // every cell shows its whole text
+
+/* Column widths: the short columns get just enough for their usual words (DISCHARGE, DR AMPATI...),
+   and name / complaint / diagnosis / other illness share the rest of the screen width. */
+const COL_PX = [30, 0, 46, 0, 0, 0, 40, 66, 82, 82, 88, 74];
+const COL_SHARE = { 1: .23, 3: .18, 4: .37, 5: .22 };
+function fitCols() {
+  const wrap = $(".table-wrap"), table = $("#log");
+  if (!wrap || !wrap.clientWidth) return;
+  const W = Math.max(wrap.clientWidth, 960), rest = W - COL_PX.reduce((a, b) => a + b, 0);
+  table.style.width = `${W}px`;
+  $$("#log col").forEach((c, i) => { c.style.width = `${COL_PX[i] || Math.floor(rest * COL_SHARE[i])}px`; });
 }
 const linked = v => String(v.log_sig || "").startsWith("[");
 const editingLog = () => !!(document.activeElement && document.activeElement.closest && document.activeElement.closest("#log tbody"));
@@ -646,6 +657,14 @@ function wire() {
   tbody.addEventListener("focusin", ev => selectRow(ev.target.closest("tr")));
   tbody.addEventListener("focusout", () => setTimeout(() => { if (sync.renderLater && !editingLog()) { sync.renderLater = false; renderAll(); } }, 0));
   tbody.addEventListener("click", ev => selectRow(ev.target.closest("tr")));
+  tbody.addEventListener("keydown", ev => {          // Enter moves down a row, like the sheet (no line breaks in cells)
+    const t = ev.target;
+    if (ev.key !== "Enter" || ev.shiftKey || ev.altKey || !t.dataset.f) return;
+    ev.preventDefault();
+    const next = t.closest("tr").nextElementSibling;
+    const cell = next && next.querySelector(`[data-f="${t.dataset.f}"]`);
+    if (cell) cell.focus(); else t.blur();
+  });
   tbody.addEventListener("input", ev => {
     const t = ev.target, tr = t.closest("tr"), v = tr && state.visits.find(x => x.id === tr.dataset.id);
     if (!v || !t.dataset.f) return;
@@ -664,6 +683,17 @@ function wire() {
     if (text && WD.looksLikePatientBlock(text)) { ev.preventDefault(); addFromBlock(text); if (t && t.id === "paste") t.value = ""; }
   });
   dlg.addEventListener("close", () => { dlg.innerHTML = ""; });
+
+  // re-fit row heights when the window changes size; keep the table header just under the top bar
+  const fitTop = () => document.documentElement.style.setProperty("--top-h", `${$(".top").offsetHeight}px`);
+  let fitTimer;
+  const refit = () => { clearTimeout(fitTimer); fitTimer = setTimeout(() => { fitTop(); fitCols(); growAll(); }, 80); };
+  window.addEventListener("resize", refit);
+  if (window.ResizeObserver) {                        // also catches zoom and scrollbars appearing
+    let lastW = 0;
+    new ResizeObserver(([e]) => { const w = Math.round(e.contentRect.width); if (w !== lastW) { lastW = w; refit(); } }).observe($(".card-log"));
+  }
+  fitTop();
 
   // pick up what was typed in the Google Sheet: on coming back to this tab, and every 2 minutes
   window.addEventListener("focus", () => { if (Date.now() - sync.last > 10000) syncDay(); });

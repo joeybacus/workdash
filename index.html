@@ -21,9 +21,9 @@
   </header>
 
   <main class="layout">
-    <section class="col-main">
-      <div class="card">
-        <div class="row">
+    <div class="top-row">
+      <div class="card card-add">
+        <div class="row wrap">
           <h2>Add a patient</h2>
           <span class="grow"></span>
           <span class="hint">Copy the Patient Information block in WebHOMIS, then press <kbd>Ctrl</kbd>+<kbd>V</kbd> anywhere on this page.</span>
@@ -36,7 +36,23 @@
         <div id="search-results"></div>
       </div>
 
-      <div class="card">
+      <div class="stack">
+        <div class="card" id="card-fu">
+          <h2 id="fu-title">Follow-up</h2>
+          <div class="row">
+            <label class="num">Months <input type="number" id="fu-months" min="0" max="24" value="6"></label>
+            <label class="num">Weeks <input type="number" id="fu-weeks" min="0" max="52" value="0"></label>
+            <button id="btn-plan" class="primary">Find Tuesday</button>
+          </div>
+          <div id="plan"></div>
+        </div>
+        <div class="card" id="card-hist" hidden></div>
+      </div>
+
+      <div class="card" id="card-sched"></div>
+    </div>
+
+    <div class="card card-log">
         <div class="row wrap">
           <h2 id="log-title">OPD logsheet</h2>
           <span class="grow"></span>
@@ -51,31 +67,17 @@
         <div id="sync-line" class="sync-line"></div>
         <div class="table-wrap">
           <table id="log">
+            <colgroup><col><col><col><col><col><col><col><col><col><col><col><col></colgroup>
             <thead><tr>
-              <th>#</th><th>Name</th><th>Age/Sex</th><th>Chief complaint</th><th>Diagnosis</th><th>Other illness</th>
-              <th>N/O/R</th><th>Ref. dept</th><th>Resident</th><th>Consultant</th><th>Disposition</th><th>Follow-up</th><th>Decked</th>
+              <th>#</th><th>Name</th><th>Age/ Sex</th><th>Chief complaint</th><th>Diagnosis</th><th>Other illness</th>
+              <th>N/O/R</th><th>Ref. dept</th><th>Resident</th><th>Consultant</th><th>Disposition</th><th>Follow-up</th>
             </tr></thead>
             <tbody></tbody>
           </table>
           <div id="log-empty" class="empty">No patients on this logsheet yet.</div>
         </div>
         <div class="hint">Click a row to plan its follow-up. Type in any cell to edit it; changes save by themselves and go to OPD Patients. What's typed in OPD Patients shows up here too.</div>
-      </div>
-    </section>
-
-    <aside class="col-side">
-      <div class="card" id="card-fu">
-        <h2 id="fu-title">Follow-up</h2>
-        <div class="row">
-          <label class="num">Months <input type="number" id="fu-months" min="0" max="24" value="6"></label>
-          <label class="num">Weeks <input type="number" id="fu-weeks" min="0" max="52" value="0"></label>
-          <button id="btn-plan" class="primary">Find Tuesday</button>
-        </div>
-        <div id="plan"></div>
-      </div>
-      <div class="card" id="card-hist" hidden></div>
-      <div class="card" id="card-sched"></div>
-    </aside>
+    </div>
   </main>
 
   <dialog id="dlg"></dialog>
