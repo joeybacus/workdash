@@ -6,9 +6,9 @@ and S2 Rx, and keeps the logsheet in two-way sync with the OPD Google Sheet: eac
 OPD Patients is found by its DATE row (wherever it has moved), what's typed there shows up in
 WorkDash, and edits in WorkDash are written back - only the cells that changed.
 
-**This repository holds only the program.** There is no patient data and no key in it.
+**This repository holds only the program.** There is no patient data in it.
 Patient data stays in the owner's Google Sheet; each computer connects once with the
-Apps Script Web App address and key, which are kept only in that browser.
+Apps Script Web App address (no key), which is kept only in that browser.
 
 - `index.html`, `style.css`, `app.js` - the page
 - `core.js` - WebHOMIS parsing, dates, follow-up planning (same rules as `opd_core.py`)

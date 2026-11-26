@@ -1,6 +1,6 @@
 /* WorkDash app - the online version of opd_clinic.py.
    Patient data lives in your Google Sheet (through the OPD Schedule Web App); this page
-   keeps only its settings (Web app URL + key, your defaults) in this browser. */
+   keeps only its settings (Web app URL, your defaults) in this browser. */
 "use strict";
 
 const $ = (s, r = document) => r.querySelector(s);
@@ -15,7 +15,7 @@ function loadSettings() {
 }
 const S = loadSettings();
 function saveSettings() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch { /* private window */ } }
-const connected = () => S.demo || (S.url && S.token);
+const connected = () => S.demo || S.url;
 
 // ------------------------------------------------------------------ state
 const state = {
@@ -53,16 +53,16 @@ async function api(action, payload = {}) {
   let js;
   if (S.demo) js = await Demo.call(action, payload);
   else {
-    if (!S.url || !S.token) throw new Error("Not connected - open Settings (⚙) and enter the Web app URL and key.");
+    if (!S.url) throw new Error("Not connected - open Settings (⚙) and enter the Web app URL.");
     let r;
     try {
-      r = await fetch(S.url, { method: "POST", body: JSON.stringify({ token: S.token, action, ...payload }) });
+      r = await fetch(S.url, { method: "POST", body: JSON.stringify({ token: S.token || undefined, action, ...payload }) });
     } catch {
       throw new Error("Couldn't reach Google. Check the internet connection.");
     }
     try { js = await r.json(); } catch { throw new Error("Unexpected reply from Google - check the Web app URL in Settings."); }
   }
-  if (!js.ok && js.error !== "date_mismatch") throw new Error(js.error === "bad token" ? "The key in Settings is wrong." : (js.error || "Google said no"));
+  if (!js.ok && js.error !== "date_mismatch") throw new Error(js.error === "bad token" ? "Your OPD Schedule Web App still asks for a key - paste the new script into Apps Script and deploy a new version." : (js.error || "Google said no"));
   return js;
 }
 
@@ -601,18 +601,16 @@ async function syncDay(loud = false) {
 function showSetup() {
   openDialog(`<h3>Connect WorkDash</h3>
     <div>WorkDash keeps your patients in your Google Sheet, through the <b>OPD Schedule Web App</b>.</div>
-    <div class="hint"><b>Easiest:</b> open your private setup link in this browser - it fills in everything below. Otherwise enter the address and key once on this computer.</div>
+    <div class="hint"><b>Easiest:</b> open your private setup link in this browser - it fills in everything below. Otherwise enter the address once on this computer.</div>
     <label class="f">Web app URL (ends in /exec)<input type="url" id="c-url" value="${esc(S.url)}" placeholder="https://script.google.com/macros/s/…/exec"></label>
-    <label class="f">Key<input type="password" id="c-token" value="${esc(S.token)}" autocomplete="off"></label>
-    <div class="hint">Both are saved only in this browser. On a shared computer, use "Forget this computer" in Settings when you're done.</div>
+    <div class="hint">It is saved only in this browser. On a shared computer, use "Forget this computer" in Settings when you're done.</div>
     <div class="actions"><button id="c-demo">Try the demo (made-up patients)</button><button class="primary" id="c-go">Connect</button></div>`, d => {
     d.onclick = async ev => {
       if (ev.target.id === "c-demo") { S.demo = true; saveSettings(); closeDialog(); loadAll(); }
       if (ev.target.id === "c-go") {
-        const url = $("#c-url", d).value.trim(), token = $("#c-token", d).value.trim();
+        const url = $("#c-url", d).value.trim();
         if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(url)) { toast("That URL doesn't look like an Apps Script Web app URL.", "warn"); return; }
-        if (!token) { toast("The key is missing - open your setup link in this browser instead; it fills in both.", "warn", 8000); return; }
-        S.url = url; S.token = token; S.demo = false;
+        S.url = url; S.demo = false;
         saveSettings(); closeDialog(); loadAll();
       }
     };
@@ -625,7 +623,6 @@ function openSettings() {
   openDialog(`<h3>Settings</h3>
     <div class="box"><h4>Connection</h4>
       <label class="f">Web app URL<input type="url" data-s="url" value="${esc(S.url)}"></label>
-      <label class="f">Key<input type="password" data-s="token" value="${esc(S.token)}" autocomplete="off"></label>
       <label><input type="checkbox" data-s="demo" ${S.demo ? "checked" : ""}> Demo mode (made-up patients, nothing is sent to Google)</label>
     </div>
     <div class="box"><h4>Logsheet defaults</h4><div class="grid2">
@@ -643,7 +640,7 @@ function openSettings() {
       const t = ev.target;
       if (t.hasAttribute("data-close")) closeDialog();
       if (t.id === "st-forget") {
-        if (!confirm("Remove the Web app key and settings from this browser? Patient data in the Google Sheet is not touched.")) return;
+        if (!confirm("Remove the Web app URL and settings from this browser? Patient data in the Google Sheet is not touched.")) return;
         try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ }
         location.reload();
       }
@@ -663,15 +660,15 @@ function openSettings() {
 
 const PRESCRIBER_KEYS = ["prescriber", "license_no", "s2_no", "s2_issued", "s2_validity", "ptr_no", "prescriber_address"];
 
-/** One-time setup link: …/workdash/#setup=<base64 of {"url":…,"token":…,"forms":{prescriber details}}>.
+/** One-time setup link: …/workdash/#setup=<base64 of {"url":…,"forms":{prescriber details}}>.
     The part after # never leaves the browser. */
 function readSetupLink() {
   const m = /setup=([A-Za-z0-9_\-+/=]+)/.exec(location.hash);
   if (!m) return;
   try {
     const js = JSON.parse(atob(m[1].replace(/-/g, "+").replace(/_/g, "/")));
-    if (js.url && js.token) {
-      S.url = js.url; S.token = js.token; S.demo = false;
+    if (js.url) {
+      S.url = js.url; S.demo = false;
       for (const k of PRESCRIBER_KEYS) if (typeof js.forms?.[k] === "string" && js.forms[k]) S[k] = js.forms[k];
       saveSettings(); toast("This computer is now connected to your Google Sheet.", "ok");
     }
