@@ -49,18 +49,61 @@ async function copyText(text, okMsg) {
 }
 
 // ------------------------------------------------------------------ backend
+/* Two ways to reach the OPD Schedule Web App:
+   1. fetch POST (normal), and
+   2. a <script> tag GET (?p=<request>&callback=…), which some browsers still load when they
+      drop the POST reply ("Failed to fetch") even though Google ran the request.
+   After a POST reply is lost once, this page uses the script-tag route first for the rest of the visit. */
+const SCRIPT_URL_MAX = 7500;          // longer requests (big imports) can only go by POST
+let preferScriptTag = false;
+let cbSeq = 0;
+
+function viaScriptTag(body) {
+  return new Promise((resolve, reject) => {
+    const name = `__wd_cb_${Date.now()}_${cbSeq++}`;
+    const el = document.createElement("script");
+    const done = () => { clearTimeout(timer); delete window[name]; el.remove(); };
+    const timer = setTimeout(() => { done(); reject(new Error("timeout")); }, 90000);
+    window[name] = js => { done(); resolve(js); };
+    el.onerror = () => { done(); reject(new Error("script load failed")); };
+    el.src = `${S.url}?p=${encodeURIComponent(body)}&callback=${name}`;
+    document.head.appendChild(el);
+  });
+}
+
+async function viaFetch(body) {
+  const r = await fetch(S.url, { method: "POST", body });
+  try { return await r.json(); } catch { throw new Error("not json"); }
+}
+
+async function callGoogle(body) {
+  const fits = S.url.length + 30 + encodeURIComponent(body).length < SCRIPT_URL_MAX;
+  const order = preferScriptTag && fits ? [viaScriptTag, viaFetch] : fits ? [viaFetch, viaScriptTag] : [viaFetch, viaFetch];
+  let last;
+  for (let i = 0; i < order.length; i++) {
+    try {
+      const js = await order[i](body);
+      if (order[i] === viaScriptTag && i > 0) preferScriptTag = true;
+      return js;
+    } catch (e) {
+      last = e;
+      console.warn(`WorkDash: ${order[i].name} failed (${e && e.message})`);
+      if (i === 0) await new Promise(r => setTimeout(r, 800));
+    }
+  }
+  throw new Error(last && last.message === "not json"
+    ? "Unexpected reply from Google - check the Web app URL in Settings."
+    : "Couldn't reach Google. Check the internet connection.");
+}
+
 async function api(action, payload = {}) {
   let js;
   if (S.demo) js = await Demo.call(action, payload);
   else {
     if (!S.url) throw new Error("Not connected - open Settings (⚙) and enter the Web app URL.");
-    let r;
-    try {
-      r = await fetch(S.url, { method: "POST", body: JSON.stringify({ token: S.token || undefined, action, ...payload }) });
-    } catch {
-      throw new Error("Couldn't reach Google. Check the internet connection.");
-    }
-    try { js = await r.json(); } catch { throw new Error("Unexpected reply from Google - check the Web app URL in Settings."); }
+    js = await callGoogle(JSON.stringify({ action, ...payload }));
+    // A request repeated over the backup route may find its own earlier write already there
+    if (action === "deck" && !js.ok && String(js.error || "").includes(`(${String(payload.name || "").trim()})`)) js = { ok: true };
   }
   if (!js.ok && js.error !== "date_mismatch") throw new Error(js.error === "bad token" ? "Your OPD Schedule Web App still asks for a key - paste the new script into Apps Script and deploy a new version." : (js.error || "Google said no"));
   return js;
